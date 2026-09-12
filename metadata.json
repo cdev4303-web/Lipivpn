@@ -1,0 +1,6 @@
+{
+  "name": "FreeShield VPN",
+  "description": "High-security Android VPN application utilizing official VpnService for real encrypted tunnel routing, server management, and network leak protection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

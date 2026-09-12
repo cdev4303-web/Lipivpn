@@ -1,0 +1,123 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (debug, release, or both)'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+          - both
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradlew executable
+        run: chmod +x gradlew
+
+      - name: Prepare environment configuration and keystore
+        run: |
+          echo "Setting up environment configuration..."
+          # Prepare .env file from .env.example if missing
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+            echo "Copied .env.example to .env"
+          elif [ ! -f .env ]; then
+            touch .env
+            echo "Created empty .env"
+          fi
+
+          # Prepare debug.keystore
+          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
+            echo "Decoding debug.keystore from base64..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
+          # Fallback: if debug.keystore is still missing, generate one
+          if [ ! -f debug.keystore ]; then
+            echo "Generating fallback debug keystore..."
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -alias androiddebugkey \
+              -storepass android \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build Debug APK
+        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both' || github.event_name != 'workflow_dispatch' }}
+        run: |
+          echo "Compiling Debug APK..."
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Build Release APK (if configured)
+        if: ${{ (github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both') && env.KEYSTORE_PATH != '' }}
+        env:
+          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "Compiling Release APK..."
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Prepare APK outputs
+        run: |
+          mkdir -p output_apks
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk output_apks/FreeShield-VPN-debug.apk
+            echo "Debug APK prepared: output_apks/FreeShield-VPN-debug.apk"
+          fi
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk output_apks/FreeShield-VPN-release.apk
+            echo "Release APK prepared: output_apks/FreeShield-VPN-release.apk"
+          fi
+
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeShield-VPN-APKs
+          path: output_apks/*.apk
+          retention-days: 30
+
+      - name: Create GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output_apks/*.apk
+          generate_release_notes: true
