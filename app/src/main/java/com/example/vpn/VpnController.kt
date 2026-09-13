@@ -70,7 +70,7 @@ object VpnController {
 
         // Validate server configuration strictly per requirements
         if (!server.isConfigured()) {
-            _vpnState.value = VpnState.Error("Server '${server.name}' is an unconfigured placeholder. Please configure a valid server IP/host or use the test endpoint.")
+            _vpnState.value = VpnState.Error("No VPN server configuration available. Please configure a valid server IP/host and WireGuard keys.")
             return
         }
 
@@ -82,13 +82,20 @@ object VpnController {
             action = FreeShieldVpnService.ACTION_CONNECT
             putExtra(FreeShieldVpnService.EXTRA_SERVER_ID, server.id)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_NAME, server.name)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_COUNTRY, server.country)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_COUNTRY_CODE, server.countryCode)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_HOST, server.host)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_PORT, server.port)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_PROTOCOL, server.protocol)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_PUBLIC_KEY, server.publicKey)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_PRESHARED_KEY, server.presharedKey)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_CLIENT_PRIVATE_KEY, server.clientPrivateKey)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_CLIENT_PUBLIC_KEY, server.clientPublicKey)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_CLIENT_IP, server.clientIp)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_ALLOWED_IPS, server.allowedIps)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_DNS, server.dns)
             putExtra(FreeShieldVpnService.EXTRA_SERVER_MTU, server.mtu)
+            putExtra(FreeShieldVpnService.EXTRA_SERVER_KEEPALIVE, server.persistentKeepalive)
             putExtra(FreeShieldVpnService.EXTRA_KILL_SWITCH, killSwitch)
             putExtra(FreeShieldVpnService.EXTRA_AUTO_RECONNECT, autoReconnect)
         }
@@ -132,10 +139,18 @@ object VpnController {
     }
 
     // Callbacks from FreeShieldVpnService
-    fun onServiceConnected(connectedAt: Long) {
+    fun onServiceConnected(connectedAt: Long, publicIp: String = "") {
         _vpnState.value = VpnState.Connected(connectedAt)
         startDurationTicker(connectedAt)
-        fetchPublicIp()
+        if (publicIp.isNotBlank()) {
+            _vpnStats.value = _vpnStats.value.copy(
+                currentPublicIp = publicIp,
+                isFetchingIp = false,
+                ipFetchError = null
+            )
+        } else {
+            fetchPublicIp()
+        }
     }
 
     fun onServiceDisconnected() {

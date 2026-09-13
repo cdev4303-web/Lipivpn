@@ -155,14 +155,14 @@ private fun AdminNoteBanner() {
             )
             Column {
                 Text(
-                    text = "Server Configuration & Architecture",
+                    text = "WireGuard Server Configuration",
                     color = Color.White,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "Servers with placeholder internal domains require editing with your real WireGuard/VPN IP or domain. Tap the pencil icon to configure.",
+                    text = "Select a gateway or tap the pencil icon to configure your WireGuard host, keys, or import a .conf file. Tap '+' to add a new server.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                     lineHeight = 16.sp

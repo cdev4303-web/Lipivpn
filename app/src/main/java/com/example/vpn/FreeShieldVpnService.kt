@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -11,9 +12,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.VpnService
 import android.os.Build
-import android.os.ParcelFileDescriptor
+import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -28,11 +28,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
-class FreeShieldVpnService : VpnService() {
+/**
+ * Foreground Service managing the WireGuard tunnel lifecycle, notification,
+ * bandwidth metrics, and network connectivity state transitions.
+ */
+class FreeShieldVpnService : Service() {
 
-    private var tunnelEngine: VpnTunnelEngine? = null
-    private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+    private val tunnelManager by lazy { WireGuardTunnelManager(this) }
 
     private var currentServer: VpnServer? = null
     private var isKillSwitchEnabled = false
@@ -42,6 +45,9 @@ class FreeShieldVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val isRunning = AtomicBoolean(false)
+    private var lastTrafficNotificationUpdate = 0L
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -56,14 +62,21 @@ class FreeShieldVpnService : VpnService() {
         when (action) {
             ACTION_CONNECT -> {
                 val serverId = intent.getLongExtra(EXTRA_SERVER_ID, 0L)
-                val serverName = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "VPN Server"
+                val serverName = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "WireGuard Server"
+                val serverCountry = intent.getStringExtra(EXTRA_SERVER_COUNTRY) ?: ""
+                val serverCountryCode = intent.getStringExtra(EXTRA_SERVER_COUNTRY_CODE) ?: ""
                 val serverHost = intent.getStringExtra(EXTRA_SERVER_HOST) ?: ""
                 val serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 51820)
                 val serverProtocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "WireGuard"
                 val serverPublicKey = intent.getStringExtra(EXTRA_SERVER_PUBLIC_KEY) ?: ""
-                val serverClientIp = intent.getStringExtra(EXTRA_SERVER_CLIENT_IP) ?: "10.0.0.2"
+                val serverPresharedKey = intent.getStringExtra(EXTRA_SERVER_PRESHARED_KEY) ?: ""
+                val serverClientPrivateKey = intent.getStringExtra(EXTRA_SERVER_CLIENT_PRIVATE_KEY) ?: ""
+                val serverClientPublicKey = intent.getStringExtra(EXTRA_SERVER_CLIENT_PUBLIC_KEY) ?: ""
+                val serverClientIp = intent.getStringExtra(EXTRA_SERVER_CLIENT_IP) ?: "10.0.0.2/32"
+                val serverAllowedIps = intent.getStringExtra(EXTRA_SERVER_ALLOWED_IPS) ?: "0.0.0.0/0, ::/0"
                 val serverDns = intent.getStringExtra(EXTRA_SERVER_DNS) ?: "1.1.1.1, 8.8.8.8"
                 val serverMtu = intent.getIntExtra(EXTRA_SERVER_MTU, 1420)
+                val serverKeepalive = intent.getIntExtra(EXTRA_SERVER_KEEPALIVE, 25)
 
                 isKillSwitchEnabled = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
                 isAutoReconnectEnabled = intent.getBooleanExtra(EXTRA_AUTO_RECONNECT, true)
@@ -71,15 +84,20 @@ class FreeShieldVpnService : VpnService() {
                 val server = VpnServer(
                     id = serverId,
                     name = serverName,
-                    country = "",
-                    countryCode = "",
+                    country = serverCountry,
+                    countryCode = serverCountryCode,
                     host = serverHost,
                     port = serverPort,
                     protocol = serverProtocol,
                     publicKey = serverPublicKey,
+                    presharedKey = serverPresharedKey,
+                    clientPrivateKey = serverClientPrivateKey,
+                    clientPublicKey = serverClientPublicKey,
                     clientIp = serverClientIp,
+                    allowedIps = serverAllowedIps,
                     dns = serverDns,
-                    mtu = serverMtu
+                    mtu = serverMtu,
+                    persistentKeepalive = serverKeepalive
                 )
                 currentServer = server
 
@@ -93,105 +111,53 @@ class FreeShieldVpnService : VpnService() {
     }
 
     private fun connect(server: VpnServer) {
-        if (isRunning.get()) {
-            Log.w(TAG, "VPN already running, tearing down previous connection before starting new")
-            cleanUpTunnel()
-        }
-
-        // Validate configuration strictly
         if (!server.isConfigured()) {
-            VpnController.onServiceError("Server configuration is not available.")
+            VpnController.onServiceError("No VPN server configuration available. Please configure a valid server IP/host and WireGuard keys.")
             stopSelf()
             return
         }
 
-        // Start Foreground Notification immediately
+        // Display immediate foreground notification
         val initialNotification = buildNotification("Connecting to ${server.name}...")
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                } else {
-                    0
-                }
-                ServiceCompat.startForeground(this, NOTIFICATION_ID, initialNotification, serviceType)
+            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             } else {
-                startForeground(NOTIFICATION_ID, initialNotification)
+                0
             }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, initialNotification, serviceType)
         } catch (e: Exception) {
             Log.e(TAG, "startForeground error: ${e.message}", e)
         }
 
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                // Configure Android TUN Interface via Builder
-                val builder = Builder()
-                builder.setSession(server.name)
-                builder.setMtu(server.mtu)
-                builder.addAddress(server.clientIp, 24)
-                builder.addRoute("0.0.0.0", 0) // Route all IPv4 network traffic
+        isRunning.set(true)
+        registerNetworkMonitor()
 
-                // DNS servers
-                server.dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { dnsIp ->
-                    try {
-                        builder.addDnsServer(dnsIp)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to add DNS $dnsIp: ${e.message}")
-                    }
-                }
-
-                // Kill switch configuration: block non-VPN traffic where supported
-                if (isKillSwitchEnabled) {
-                    builder.setBlocking(true)
-                }
-
-                // Establish TUN Interface
-                val pfd = builder.establish()
-                if (pfd == null) {
-                    throw IllegalStateException("VpnService.Builder.establish() returned null. TUN interface could not be created.")
-                }
-                vpnInterface = pfd
-                isRunning.set(true)
-
-                // Initialize real tunnel engine and protected socket loop
-                val engine = VpnTunnelEngine(
-                    vpnService = this@FreeShieldVpnService,
-                    pfd = pfd,
-                    server = server,
-                    onStatsUpdated = { bytesIn, bytesOut ->
-                        VpnController.updateTrafficStats(bytesIn, bytesOut)
-                        updateNotificationTraffic(server.name, bytesIn, bytesOut)
-                    },
-                    onError = { errorMsg ->
-                        Log.e(TAG, "Tunnel engine reported error: $errorMsg")
-                        handleConnectionError(errorMsg)
-                    }
-                )
-                tunnelEngine = engine
-                engine.start(serviceScope)
-
-                registerNetworkMonitor()
-
-                val connectedAt = System.currentTimeMillis()
-                VpnController.onServiceConnected(connectedAt)
-
-                updateNotification("Protected via ${server.name}")
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to establish VPN connection: ${e.message}", e)
-                handleConnectionError("Connection failed: ${e.localizedMessage ?: "Unknown tunnel error"}")
+        tunnelManager.startTunnel(
+            server = server,
+            scope = serviceScope,
+            onConnected = { connectedAt, publicIp ->
+                updateNotification("Connected to ${server.name} • Public IP: $publicIp")
+                VpnController.onServiceConnected(connectedAt, publicIp)
+            },
+            onError = { errorMessage ->
+                handleConnectionError(errorMessage)
+            },
+            onStatsUpdate = { rxBytes, txBytes ->
+                VpnController.updateTrafficStats(rxBytes, txBytes)
+                updateNotificationTraffic(server.name, rxBytes, txBytes)
             }
-        }
+        )
     }
 
     private fun handleConnectionError(errorMessage: String) {
-        cleanUpTunnel()
+        cleanUp()
         VpnController.onServiceError(errorMessage)
 
         if (isAutoReconnectEnabled && currentServer != null && currentServer!!.isConfigured()) {
             serviceScope.launch {
-                Log.i(TAG, "Auto-reconnect triggered in 3 seconds...")
-                delay(3000)
+                Log.i(TAG, "Auto-reconnect scheduled in 4 seconds...")
+                delay(4000)
                 if (!isRunning.get() && currentServer != null) {
                     connect(currentServer!!)
                 }
@@ -202,37 +168,22 @@ class FreeShieldVpnService : VpnService() {
     }
 
     private fun disconnect() {
-        Log.i(TAG, "Disconnect requested")
-        cleanUpTunnel()
+        Log.i(TAG, "Disconnecting VPN tunnel...")
+        cleanUp()
         VpnController.onServiceDisconnected()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun cleanUpTunnel() {
+    private fun cleanUp() {
         isRunning.set(false)
         unregisterNetworkMonitor()
-
-        try {
-            tunnelEngine?.stop()
-        } catch (_: Exception) {}
-        tunnelEngine = null
-
-        try {
-            vpnInterface?.close()
-        } catch (_: Exception) {}
-        vpnInterface = null
-    }
-
-    override fun onRevoke() {
-        Log.w(TAG, "VPN permission was revoked by the system or user in Android Settings.")
-        disconnect()
-        super.onRevoke()
+        tunnelManager.stopTunnel()
     }
 
     override fun onDestroy() {
         Log.i(TAG, "FreeShieldVpnService onDestroy")
-        cleanUpTunnel()
+        cleanUp()
         super.onDestroy()
     }
 
@@ -246,13 +197,17 @@ class FreeShieldVpnService : VpnService() {
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onLost(network: Network) {
                     Log.w(TAG, "Default network lost")
-                    if (isRunning.get()) {
-                        handleConnectionError("Network connection lost.")
+                    if (isRunning.get() && isAutoReconnectEnabled) {
+                        Log.i(TAG, "Network lost while VPN active, awaiting network re-establishment...")
                     }
                 }
 
                 override fun onAvailable(network: Network) {
-                    Log.i(TAG, "Network became available")
+                    Log.i(TAG, "Network connection re-established")
+                    if (isRunning.get() && !tunnelManager.isRunning() && currentServer != null) {
+                        Log.i(TAG, "Reconnecting WireGuard tunnel after network change...")
+                        connect(currentServer!!)
+                    }
                 }
             }
             connectivityManager?.registerNetworkCallback(request, callback)
@@ -319,13 +274,12 @@ class FreeShieldVpnService : VpnService() {
         notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
-    private var lastTrafficUpdate = 0L
-    private fun updateNotificationTraffic(serverName: String, bytesIn: Long, bytesOut: Long) {
+    private fun updateNotificationTraffic(serverName: String, rxBytes: Long, txBytes: Long) {
         val now = System.currentTimeMillis()
-        if (now - lastTrafficUpdate > 3000) {
-            lastTrafficUpdate = now
-            val down = VpnStats.formatBytes(bytesIn)
-            val up = VpnStats.formatBytes(bytesOut)
+        if (now - lastTrafficNotificationUpdate > 3000) {
+            lastTrafficNotificationUpdate = now
+            val down = VpnStats.formatBytes(rxBytes)
+            val up = VpnStats.formatBytes(txBytes)
             updateNotification("Connected to $serverName • ↓$down ↑$up")
         }
     }
@@ -336,13 +290,20 @@ class FreeShieldVpnService : VpnService() {
 
         const val EXTRA_SERVER_ID = "extra_server_id"
         const val EXTRA_SERVER_NAME = "extra_server_name"
+        const val EXTRA_SERVER_COUNTRY = "extra_server_country"
+        const val EXTRA_SERVER_COUNTRY_CODE = "extra_server_country_code"
         const val EXTRA_SERVER_HOST = "extra_server_host"
         const val EXTRA_SERVER_PORT = "extra_server_port"
         const val EXTRA_SERVER_PROTOCOL = "extra_server_protocol"
         const val EXTRA_SERVER_PUBLIC_KEY = "extra_server_public_key"
+        const val EXTRA_SERVER_PRESHARED_KEY = "extra_server_preshared_key"
+        const val EXTRA_SERVER_CLIENT_PRIVATE_KEY = "extra_server_client_private_key"
+        const val EXTRA_SERVER_CLIENT_PUBLIC_KEY = "extra_server_client_public_key"
         const val EXTRA_SERVER_CLIENT_IP = "extra_server_client_ip"
+        const val EXTRA_SERVER_ALLOWED_IPS = "extra_server_allowed_ips"
         const val EXTRA_SERVER_DNS = "extra_server_dns"
         const val EXTRA_SERVER_MTU = "extra_server_mtu"
+        const val EXTRA_SERVER_KEEPALIVE = "extra_server_keepalive"
         const val EXTRA_KILL_SWITCH = "extra_kill_switch"
         const val EXTRA_AUTO_RECONNECT = "extra_auto_reconnect"
 

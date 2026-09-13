@@ -10,7 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-@Database(entities = [VpnServer::class], version = 1, exportSchema = false)
+@Database(entities = [VpnServer::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun vpnServerDao(): VpnServerDao
@@ -26,6 +26,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "freeshield_vpn.db"
                 )
+                    .fallbackToDestructiveMigration()
                     .addCallback(AppDatabaseCallback(scope))
                     .build()
                 INSTANCE = instance
@@ -46,83 +47,91 @@ abstract class AppDatabase : RoomDatabase() {
             }
 
             private suspend fun populateInitialServers(dao: VpnServerDao) {
-                // Pre-populate required example entries with clearly marked placeholder values
-                // Per requirements: Do not hard-code fake working IPs or pretend they are functional.
                 val defaultServers = listOf(
                     VpnServer(
                         id = 1L,
-                        name = "Singapore Cloud Gateway",
+                        name = "Singapore",
                         country = "Singapore",
                         countryCode = "SG",
-                        host = "sg-node1.placeholder.internal",
+                        host = "",
                         port = 51820,
                         protocol = "WireGuard",
-                        publicKey = "INSERT_SG_WIREGUARD_PUBLIC_KEY_BASE64",
-                        clientIp = "10.10.1.2",
+                        publicKey = "",
+                        clientPrivateKey = "",
+                        clientPublicKey = "",
+                        clientIp = "10.0.0.2/32",
                         dns = "1.1.1.1, 8.8.8.8",
                         mtu = 1420,
                         isCustom = false,
-                        notes = "Example placeholder: Edit host to your real Singapore server IP/domain and insert public key."
+                        notes = "Configure with your WireGuard endpoint host and keys to connect."
                     ),
                     VpnServer(
                         id = 2L,
-                        name = "United States East",
+                        name = "United States",
                         country = "United States",
                         countryCode = "US",
-                        host = "us-east.placeholder.internal",
+                        host = "",
                         port = 51820,
                         protocol = "WireGuard",
-                        publicKey = "INSERT_US_WIREGUARD_PUBLIC_KEY_BASE64",
-                        clientIp = "10.10.2.2",
+                        publicKey = "",
+                        clientPrivateKey = "",
+                        clientPublicKey = "",
+                        clientIp = "10.0.0.2/32",
                         dns = "1.1.1.1, 8.8.8.8",
                         mtu = 1420,
                         isCustom = false,
-                        notes = "Example placeholder: Edit host to your real US server IP/domain and insert public key."
+                        notes = "Configure with your WireGuard endpoint host and keys to connect."
                     ),
                     VpnServer(
                         id = 3L,
-                        name = "Germany Frankfurt",
+                        name = "Germany",
                         country = "Germany",
                         countryCode = "DE",
-                        host = "de-fra.placeholder.internal",
+                        host = "",
                         port = 51820,
                         protocol = "WireGuard",
-                        publicKey = "INSERT_DE_WIREGUARD_PUBLIC_KEY_BASE64",
-                        clientIp = "10.10.3.2",
+                        publicKey = "",
+                        clientPrivateKey = "",
+                        clientPublicKey = "",
+                        clientIp = "10.0.0.2/32",
                         dns = "1.1.1.1, 9.9.9.9",
                         mtu = 1420,
                         isCustom = false,
-                        notes = "Example placeholder: Edit host to your real Germany server IP/domain."
+                        notes = "Configure with your WireGuard endpoint host and keys to connect."
                     ),
                     VpnServer(
                         id = 4L,
-                        name = "Netherlands Amsterdam",
+                        name = "Netherlands",
                         country = "Netherlands",
                         countryCode = "NL",
-                        host = "nl-ams.placeholder.internal",
+                        host = "",
                         port = 51820,
                         protocol = "WireGuard",
-                        publicKey = "INSERT_NL_WIREGUARD_PUBLIC_KEY_BASE64",
-                        clientIp = "10.10.4.2",
+                        publicKey = "",
+                        clientPrivateKey = "",
+                        clientPublicKey = "",
+                        clientIp = "10.0.0.2/32",
                         dns = "1.1.1.1, 8.8.8.8",
                         mtu = 1420,
                         isCustom = false,
-                        notes = "Example placeholder: Edit host to your real Netherlands server IP/domain."
+                        notes = "Configure with your WireGuard endpoint host and keys to connect."
                     ),
                     VpnServer(
                         id = 5L,
-                        name = "United Kingdom London",
+                        name = "United Kingdom",
                         country = "United Kingdom",
                         countryCode = "GB",
-                        host = "uk-lon.placeholder.internal",
+                        host = "",
                         port = 51820,
                         protocol = "WireGuard",
-                        publicKey = "INSERT_UK_WIREGUARD_PUBLIC_KEY_BASE64",
-                        clientIp = "10.10.5.2",
+                        publicKey = "",
+                        clientPrivateKey = "",
+                        clientPublicKey = "",
+                        clientIp = "10.0.0.2/32",
                         dns = "1.1.1.1, 8.8.8.8",
                         mtu = 1420,
                         isCustom = false,
-                        notes = "Example placeholder: Edit host to your real UK server IP/domain."
+                        notes = "Configure with your WireGuard endpoint host and keys to connect."
                     )
                 )
                 dao.insertServers(defaultServers)

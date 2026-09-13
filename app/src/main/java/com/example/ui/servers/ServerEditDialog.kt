@@ -1,5 +1,10 @@
 package com.example.ui.servers
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,9 +20,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.NetworkCheck
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -40,7 +49,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -53,6 +64,8 @@ import com.example.ui.theme.EmeraldProtected
 import com.example.ui.theme.ShieldSurfaceBorder
 import com.example.ui.theme.ShieldSurfaceDark
 import com.example.ui.theme.ShieldSurfaceVariantDark
+import com.wireguard.crypto.Key
+import com.wireguard.crypto.KeyPair
 import kotlinx.coroutines.launch
 
 @Composable
@@ -63,18 +76,28 @@ fun ServerEditDialog(
     onDelete: (VpnServer) -> Unit,
     onTestPing: suspend (VpnServer) -> Long
 ) {
+    val context = LocalContext.current
     val isNew = server == null
+
     var name by remember { mutableStateOf(server?.name ?: "") }
-    var country by remember { mutableStateOf(server?.country ?: "United States") }
+    var country by remember { mutableStateOf(server?.country ?: "Custom Gateway") }
     var countryCode by remember { mutableStateOf(server?.countryCode ?: "US") }
     var host by remember { mutableStateOf(server?.host ?: "") }
     var portText by remember { mutableStateOf((server?.port ?: 51820).toString()) }
     var protocol by remember { mutableStateOf(server?.protocol ?: "WireGuard") }
     var publicKey by remember { mutableStateOf(server?.publicKey ?: "") }
-    var clientIp by remember { mutableStateOf(server?.clientIp ?: "10.0.0.2") }
+    var presharedKey by remember { mutableStateOf(server?.presharedKey ?: "") }
+    var clientPrivateKey by remember { mutableStateOf(server?.clientPrivateKey ?: "") }
+    var clientPublicKey by remember { mutableStateOf(server?.clientPublicKey ?: "") }
+    var clientIp by remember { mutableStateOf(server?.clientIp ?: "10.0.0.2/32") }
+    var allowedIps by remember { mutableStateOf(server?.allowedIps ?: "0.0.0.0/0, ::/0") }
     var dns by remember { mutableStateOf(server?.dns ?: "1.1.1.1, 8.8.8.8") }
     var mtuText by remember { mutableStateOf((server?.mtu ?: 1420).toString()) }
+    var keepaliveText by remember { mutableStateOf((server?.persistentKeepalive ?: 25).toString()) }
     var notes by remember { mutableStateOf(server?.notes ?: "") }
+
+    var showConfImporter by remember { mutableStateOf(false) }
+    var rawConfInput by remember { mutableStateOf("") }
 
     var testPingResult by remember { mutableStateOf<Long?>(null) }
     var isTestingPing by remember { mutableStateOf(false) }
@@ -97,7 +120,7 @@ fun ServerEditDialog(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = if (isNew) "Add VPN Gateway" else "Configure Server Endpoint",
+                    text = if (isNew) "Add WireGuard Server" else "Configure WireGuard Node",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
                     fontSize = 18.sp
@@ -122,41 +145,112 @@ fun ServerEditDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Developer / Admin instruction note
+                // Info Banner
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = ElectricCyan.copy(alpha = 0.1f),
                     border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.3f))
                 ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
-                        Column {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
                             Text(
-                                text = "Enter the legitimate IP address or domain of your WireGuard/VPN server, or click 'Fill Test Endpoint' below to test the Android VPN tunnel immediately.",
+                                text = "Enter your legitimate WireGuard server Endpoint IP/Host and cryptographic keys, or import from a .conf file.",
                                 color = Color.White.copy(alpha = 0.85f),
                                 fontSize = 11.sp,
                                 lineHeight = 15.sp
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Quick Action: Import .conf
                             OutlinedButton(
-                                onClick = {
-                                    host = "1.1.1.1"
-                                    portText = "51820"
-                                    publicKey = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="
-                                    clientIp = "10.0.0.2"
-                                    dns = "1.1.1.1, 8.8.8.8"
-                                    validationError = null
-                                },
+                                onClick = { showConfImporter = !showConfImporter },
                                 shape = RoundedCornerShape(6.dp),
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.6f)),
-                                modifier = Modifier.testTag("fill_test_endpoint_button")
+                                border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.5f)),
+                                modifier = Modifier.weight(1f).testTag("toggle_conf_import_button")
                             ) {
-                                Text("⚡ Fill Test Endpoint (1.1.1.1)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (showConfImporter) "Hide Importer" else "Import .conf", fontSize = 11.sp)
+                            }
+
+                            // Quick Action: Generate Client Keypair
+                            OutlinedButton(
+                                onClick = {
+                                    val (privKey, pubKey) = VpnServer.generateKeyPair()
+                                    clientPrivateKey = privKey
+                                    clientPublicKey = pubKey
+                                    Toast.makeText(context, "New WireGuard keypair generated.", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldProtected),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldProtected.copy(alpha = 0.5f)),
+                                modifier = Modifier.weight(1f).testTag("generate_keys_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Gen Keys", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                // Collapsible WireGuard .conf Importer Box
+                AnimatedVisibility(visible = showConfImporter) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = ShieldSurfaceVariantDark,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ShieldSurfaceBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "Paste wg0.conf or client config content:",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            OutlinedTextField(
+                                value = rawConfInput,
+                                onValueChange = { rawConfInput = it },
+                                placeholder = { Text("[Interface]\nPrivateKey = ...\nAddress = ...\n[Peer]\nPublicKey = ...\nEndpoint = ...", fontSize = 11.sp) },
+                                modifier = Modifier.fillMaxWidth().height(120.dp),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                                colors = customTextFieldColors()
+                            )
+                            Button(
+                                onClick = {
+                                    if (rawConfInput.isNotBlank()) {
+                                        val parsed = VpnServer.parseFromWgConfig(rawConfInput, defaultName = name.ifBlank { "Imported Server" })
+                                        if (parsed.host.isNotBlank()) host = parsed.host
+                                        portText = parsed.port.toString()
+                                        if (parsed.publicKey.isNotBlank()) publicKey = parsed.publicKey
+                                        if (parsed.presharedKey.isNotBlank()) presharedKey = parsed.presharedKey
+                                        if (parsed.clientPrivateKey.isNotBlank()) clientPrivateKey = parsed.clientPrivateKey
+                                        if (parsed.clientPublicKey.isNotBlank()) clientPublicKey = parsed.clientPublicKey
+                                        if (parsed.clientIp.isNotBlank()) clientIp = parsed.clientIp
+                                        if (parsed.allowedIps.isNotBlank()) allowedIps = parsed.allowedIps
+                                        if (parsed.dns.isNotBlank()) dns = parsed.dns
+                                        mtuText = parsed.mtu.toString()
+                                        keepaliveText = parsed.persistentKeepalive.toString()
+                                        showConfImporter = false
+                                        validationError = null
+                                        Toast.makeText(context, "Config parsed and fields populated!", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color.Black),
+                                modifier = Modifier.fillMaxWidth().testTag("apply_conf_button")
+                            ) {
+                                Text("Apply Parsed Configuration", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -175,7 +269,7 @@ fun ServerEditDialog(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Server Label") },
-                    placeholder = { Text("e.g. My Secure Node 1") },
+                    placeholder = { Text("e.g. Singapore Production Node") },
                     modifier = Modifier.fillMaxWidth().testTag("input_server_name"),
                     colors = customTextFieldColors()
                 )
@@ -192,17 +286,18 @@ fun ServerEditDialog(
                         value = countryCode,
                         onValueChange = { if (it.length <= 2) countryCode = it.uppercase() },
                         label = { Text("Code") },
-                        placeholder = { Text("US") },
+                        placeholder = { Text("SG") },
                         modifier = Modifier.weight(1f),
                         colors = customTextFieldColors()
                     )
                 }
 
+                // Host and Port
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = host,
                         onValueChange = { host = it },
-                        label = { Text("Server Host / IP") },
+                        label = { Text("Endpoint Host / IP") },
                         placeholder = { Text("e.g. 198.51.100.24") },
                         modifier = Modifier.weight(2.5f).testTag("input_server_host"),
                         colors = customTextFieldColors()
@@ -218,21 +313,72 @@ fun ServerEditDialog(
                     )
                 }
 
+                // Server Public Key
                 OutlinedTextField(
                     value = publicKey,
                     onValueChange = { publicKey = it },
-                    label = { Text("Server Public Key") },
-                    placeholder = { Text("Base64 WireGuard Public Key") },
+                    label = { Text("Server Public Key (Base64)") },
+                    placeholder = { Text("WireGuard Peer PublicKey") },
                     modifier = Modifier.fillMaxWidth().testTag("input_server_public_key"),
                     colors = customTextFieldColors()
                 )
 
+                // Client Private Key with auto derivation
+                OutlinedTextField(
+                    value = clientPrivateKey,
+                    onValueChange = {
+                        clientPrivateKey = it
+                        try {
+                            if (it.length >= 40) {
+                                val key = Key.fromBase64(it.trim())
+                                clientPublicKey = KeyPair(key).publicKey.toBase64()
+                            }
+                        } catch (_: Exception) {}
+                    },
+                    label = { Text("Client Private Key (Base64)") },
+                    placeholder = { Text("Interface PrivateKey") },
+                    modifier = Modifier.fillMaxWidth().testTag("input_client_private_key"),
+                    colors = customTextFieldColors()
+                )
+
+                // Client Public Key display (User copies this to add to server wg0.conf [Peer] section)
+                if (clientPublicKey.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = ShieldSurfaceVariantDark,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ShieldSurfaceBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Client Public Key (Add this to your server wg0.conf):", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                                Text(clientPublicKey, color = EmeraldProtected, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            }
+                            IconButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("WireGuard Public Key", clientPublicKey))
+                                    Toast.makeText(context, "Copied Client Public Key to clipboard", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy", tint = ElectricCyan, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Tunnel IP & MTU
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = clientIp,
                         onValueChange = { clientIp = it },
-                        label = { Text("Tunnel Client IP") },
-                        placeholder = { Text("10.0.0.2") },
+                        label = { Text("Interface IP") },
+                        placeholder = { Text("10.0.0.2/32") },
                         modifier = Modifier.weight(1f),
                         colors = customTextFieldColors()
                     )
@@ -247,6 +393,7 @@ fun ServerEditDialog(
                     )
                 }
 
+                // DNS & Allowed IPs
                 OutlinedTextField(
                     value = dns,
                     onValueChange = { dns = it },
@@ -256,7 +403,16 @@ fun ServerEditDialog(
                     colors = customTextFieldColors()
                 )
 
-                // Ping Test Action
+                OutlinedTextField(
+                    value = allowedIps,
+                    onValueChange = { allowedIps = it },
+                    label = { Text("Allowed IPs") },
+                    placeholder = { Text("0.0.0.0/0, ::/0") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = customTextFieldColors()
+                )
+
+                // Reachability Test
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -313,8 +469,8 @@ fun ServerEditDialog(
                         validationError = "Please enter a server name."
                         return@Button
                     }
-                    if (host.isBlank()) {
-                        validationError = "Please enter a valid server host or IP address."
+                    if (host.isBlank() || host.contains("placeholder") || host.contains("example.com")) {
+                        validationError = "Please enter a legitimate server host or IP address (not a placeholder)."
                         return@Button
                     }
                     val port = portText.toIntOrNull()
@@ -322,7 +478,16 @@ fun ServerEditDialog(
                         validationError = "Port must be a valid number between 1 and 65535."
                         return@Button
                     }
+                    if (publicKey.isBlank() || publicKey.length < 32) {
+                        validationError = "Please enter a valid Base64 WireGuard Server Public Key."
+                        return@Button
+                    }
+                    if (clientPrivateKey.isBlank() || clientPrivateKey.length < 32) {
+                        validationError = "Please enter or generate a Client Private Key."
+                        return@Button
+                    }
                     val mtu = mtuText.toIntOrNull() ?: 1420
+                    val keepalive = keepaliveText.toIntOrNull() ?: 25
 
                     val updatedServer = (server ?: VpnServer(
                         name = name,
@@ -338,9 +503,14 @@ fun ServerEditDialog(
                         port = port,
                         protocol = protocol,
                         publicKey = publicKey,
+                        presharedKey = presharedKey,
+                        clientPrivateKey = clientPrivateKey,
+                        clientPublicKey = clientPublicKey,
                         clientIp = clientIp,
+                        allowedIps = allowedIps,
                         dns = dns,
                         mtu = mtu,
+                        persistentKeepalive = keepalive,
                         notes = notes
                     )
                     onSave(updatedServer)
